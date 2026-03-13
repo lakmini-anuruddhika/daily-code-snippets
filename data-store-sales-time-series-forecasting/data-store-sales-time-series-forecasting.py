@@ -1,36 +1,3 @@
-"""
-Store Sales Time Series Forecasting - Kaggle Getting Started
-Train a model and generate submission.csv (RMSLE evaluation).
-Fine-tune with: python train_and_submit.py --tune [--n-trials 50]
-
-================================================================================
-TUNING GUIDE – What to change to reduce RMSLE
-================================================================================
-
-1. MODEL HYPERPARAMETERS (lgb_params below, or use --tune)
-   - n_estimators:    more trees → often better (try 600–1200); balance with time
-   - learning_rate:   lower (e.g. 0.02–0.05) + more trees usually helps
-   - max_depth:       lower = less overfit (try 6–10)
-   - num_leaves:      main complexity knob (try 32–128)
-   - min_child_samples: higher = less overfit (try 30–80)
-   - subsample:       row sampling (0.6–0.9)
-   - colsample_bytree: column sampling (0.6–0.9)
-   - reg_alpha, reg_lambda: L1/L2; add e.g. 0.1–1.0 to reduce overfitting
-
-2. FEATURE ENGINEERING (in add_date_features, merge_oil, build_features)
-   - Date: add payday (e.g. 15th, last day of month), quarter, is_month_start/end
-   - Oil:   add more rolling windows (e.g. 14, 60), or oil YoY change
-   - Holiday: use "transferred" flag, or merge local/regional by store city
-   - Store×Family: add lag/rolling mean sales per (store_nbr, family) if you add
-     historical aggregates (requires building rollups from train and merging to test)
-
-3. VALIDATION
-   - --val-days: use 14–30 days; longer val = more stable RMSLE estimate
-
-4. TUNING COMMAND
-   - python train_and_submit.py --tune --n-trials 80 --tune-timeout 7200
-================================================================================
-"""
 import argparse
 import numpy as np
 import pandas as pd
@@ -56,15 +23,21 @@ def load_data():
 
 
 def add_date_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add date-based features (keep minimal for better public leaderboard)."""
+    """Add date-based features (including payday, quarter, month boundaries)."""
     df = df.copy()
     df["year"] = df["date"].dt.year
     df["month"] = df["date"].dt.month
     df["day"] = df["date"].dt.day
     df["day_of_week"] = df["date"].dt.dayofweek
     df["day_of_year"] = df["date"].dt.dayofyear
-    df["week_of_year"] = df["date"].dt.isocalendar().week
+    df["week_of_year"] = df["date"].dt.isocalendar().week.astype(int)
     df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
+    df["quarter"] = df["date"].dt.quarter
+    df["is_month_start"] = df["date"].dt.is_month_start.astype(int)
+    df["is_month_end"] = df["date"].dt.is_month_end.astype(int)
+    # Payday: 15th and last day of month often boost grocery sales
+    df["is_payday"] = ((df["day"] >= 14) & (df["day"] <= 16)) | df["is_month_end"].astype(bool)
+    df["is_payday"] = df["is_payday"].astype(int)
     return df
 
 
@@ -81,11 +54,12 @@ def prepare_holidays(holidays: pd.DataFrame) -> pd.DataFrame:
 
 
 def merge_oil(df: pd.DataFrame, oil: pd.DataFrame) -> pd.DataFrame:
-    """Merge oil price and fill missing; add rolling features."""
+    """Merge oil price and fill missing; add rolling features (7, 14, 30 days)."""
     oil = oil.copy()
     oil["dcoilwtico"] = pd.to_numeric(oil["dcoilwtico"], errors="coerce")
     oil = oil.sort_values("date")
     oil["oil_rolling_mean_7"] = oil["dcoilwtico"].rolling(7, min_periods=1).mean()
+    oil["oil_rolling_mean_14"] = oil["dcoilwtico"].rolling(14, min_periods=1).mean()
     oil["oil_rolling_mean_30"] = oil["dcoilwtico"].rolling(30, min_periods=1).mean()
     oil = oil.ffill().bfill()
     return df.merge(oil, on="date", how="left")
@@ -102,6 +76,20 @@ def build_features(
     """Build feature sets for train and test."""
     national_hol, any_hol = prepare_holidays(holidays)
 
+    # Store-family lagged rolling means (from train only, no leakage)
+    train_sorted = train.sort_values(["store_nbr", "family", "date"])
+
+    def _rolling_sf(g):
+        return g.assign(
+            sales_rolling_7_sf=g["sales"].shift(1).rolling(7, min_periods=1).mean(),
+            sales_rolling_30_sf=g["sales"].shift(1).rolling(30, min_periods=1).mean(),
+        )
+    sf_rolling = train_sorted.groupby(["store_nbr", "family"], group_keys=False).apply(_rolling_sf)[
+        ["date", "store_nbr", "family", "sales_rolling_7_sf", "sales_rolling_30_sf"]
+    ]
+    last_date = sf_rolling["date"].max()
+    last_sf = sf_rolling[sf_rolling["date"] == last_date].drop(columns=["date"])
+
     def _process(df: pd.DataFrame, is_train: bool) -> pd.DataFrame:
         df = add_date_features(df)
         df = df.merge(stores, on="store_nbr", how="left")
@@ -110,6 +98,11 @@ def build_features(
         df = df.merge(any_hol, on="date", how="left")
         df["is_national_holiday"] = df["is_national_holiday"].fillna(0).astype(int)
         df["is_holiday_any"] = df["is_holiday_any"].fillna(0).astype(int)
+        # Store-family rolling sales (lagged)
+        if is_train:
+            df = df.merge(sf_rolling, on=["date", "store_nbr", "family"], how="left")
+        else:
+            df = df.merge(last_sf, on=["store_nbr", "family"], how="left")
         # Transactions: daily store-level (use for train; test we'll merge historical mean or leave NaN and fill)
         if is_train:
             df = df.merge(
@@ -131,6 +124,10 @@ def build_features(
         for col in ["family", "city", "state", "type"]:
             if col in df.columns:
                 df[col] = df[col].astype("category").cat.codes
+        # Fill store-family rolling NaNs (first days per group) with 0
+        for c in ["sales_rolling_7_sf", "sales_rolling_30_sf"]:
+            if c in df.columns:
+                df[c] = df[c].fillna(0)
         return df
 
     X_train = _process(train, is_train=True)
@@ -157,16 +154,23 @@ def get_feature_columns():
         "day_of_year",
         "week_of_year",
         "is_weekend",
+        "quarter",
+        "is_month_start",
+        "is_month_end",
+        "is_payday",
         "cluster",
         "city",
         "state",
         "type",
         "dcoilwtico",
         "oil_rolling_mean_7",
+        "oil_rolling_mean_14",
         "oil_rolling_mean_30",
         "is_national_holiday",
         "is_holiday_any",
         "transactions",
+        "sales_rolling_7_sf",
+        "sales_rolling_30_sf",
     ]
 
 
@@ -431,8 +435,11 @@ def main():
     parser.add_argument("--n-trials", type=int, default=30, help="Number of Optuna trials when using --tune (default: 30)")
     parser.add_argument("--tune-timeout", type=int, default=3600, help="Max seconds for tuning (default: 3600)")
     parser.add_argument("--use-random-search", action="store_true", help="Use RandomizedSearchCV instead of Optuna (no extra dep)")
-    parser.add_argument("--val-days", type=int, default=14, help="Last N days of train used for validation (default: 14)")
+    parser.add_argument("--val-days", type=int, default=21, help="Last N days of train used for validation (default: 21)")
     parser.add_argument("--no-figures", action="store_true", help="Skip generating report figures")
+    parser.add_argument("--n-estimators", type=int, default=500, help="LightGBM n_estimators (default: 500; best public LB in testing)")
+    parser.add_argument("--learning-rate", type=float, default=0.7, help="LightGBM learning_rate (default: 0.7)")
+    parser.add_argument("--ensemble", type=int, default=0, metavar="N", help="Average N models (seeds 42..42+N-1) for submission (e.g. 3)")
     args = parser.parse_args()
 
     print("Loading data...")
@@ -476,15 +483,17 @@ def main():
     X_val = X_tr[val_mask]
     y_val = train.loc[val_mask, "sales"].values
 
-    # Hyperparameters: simple defaults that tend to generalize well on public LB
+    # Hyperparameters: tuned for RMSLE (lower LR + more trees + regularization)
     lgb_params: Dict[str, Any] = {
         "n_estimators": 500,
         "learning_rate": 0.7,
         "max_depth": 8,
-        "num_leaves": 64,
-        "min_child_samples": 20,
+        "num_leaves": 128,
+        "min_child_samples": 40,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
+        "reg_alpha": 0.2,
+        "reg_lambda": 0.2,
         "random_state": 42,
         "verbosity": -1,
         "n_jobs": -1,
@@ -519,9 +528,21 @@ def main():
         val_pred_sales = np.expm1(model.predict(X_val)) if len(X_val) > 0 else np.array([])
         val_pred_sales = np.clip(val_pred_sales, 0, None) if len(val_pred_sales) > 0 else val_pred_sales
 
-    pred_log = model.predict(X_te)
-    pred_sales = np.expm1(pred_log)
-    pred_sales = np.clip(pred_sales, 0, None)
+    n_ensemble = max(0, int(args.ensemble))
+    if n_ensemble > 0:
+        print(f"Ensemble: averaging {n_ensemble} models (seeds 42..{41 + n_ensemble})...")
+        preds_list = []
+        for i in range(n_ensemble):
+            params = {**lgb_params, "random_state": 42 + i}
+            m = lgb.LGBMRegressor(**params)
+            m.fit(X_tr, target)
+            p = np.expm1(m.predict(X_te))
+            preds_list.append(np.clip(p, 0, None))
+        pred_sales = np.mean(preds_list, axis=0)
+    else:
+        pred_log = model.predict(X_te)
+        pred_sales = np.expm1(pred_log)
+        pred_sales = np.clip(pred_sales, 0, None)
 
     submission = pd.DataFrame({"id": test["id"], "sales": pred_sales})
     submission.to_csv(SUBMISSION_PATH, index=False)
