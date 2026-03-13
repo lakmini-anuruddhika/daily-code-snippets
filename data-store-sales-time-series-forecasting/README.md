@@ -1,92 +1,162 @@
-# Store Sales Time Series Forecasting
+## Store Sales - Time Series Forecasting
 
-Solution for the [Kaggle Store Sales Time Series Forecasting](https://www.kaggle.com/competitions/store-sales-time-series-forecasting/overview) (Getting Started) competition.
+This repository contains a machine learning solution for the Kaggle
+**Store Sales - Time Series Forecasting**(https://www.kaggle.com/competitions/store-sales-time-series-forecasting) competition. The project uses
+**Gradient Boosted Decision Trees (LightGBM)** to forecast grocery sales
+for Corporación Favorita stores in Ecuador.
 
-## Setup
+------------------------------------------------------------------------
 
-```bash
-pip install -r requirements.txt
+## Project Overview
+
+The objective of this project is to predict the **unit sales for
+thousands of items** sold across multiple Favorita stores. Accurate
+sales forecasting helps:
+
+-   Reduce food waste caused by overstocking\
+-   Prevent lost revenue due to stockouts\
+-   Improve inventory planning
+
+------------------------------------------------------------------------
+
+## Key Engineering Features
+
+### Time-Series Features
+
+-   Lag features to capture previous sales behavior\
+-   Rolling mean features (7-day and 30-day windows) to detect trends
+    and seasonality
+
+### Economic Indicators
+
+-   Incorporates daily oil prices, which strongly influence Ecuador's
+    economy
+
+### Calendar Events
+
+-   National and local holidays\
+-   Bi-monthly payday effect (15th and end of the month)
+
+### Advanced Modeling
+
+-   Optuna for automated hyperparameter optimization\
+-   Model ensembling for more stable predictions
+
+### Automated Reporting
+
+The pipeline generates 9 diagnostic plots to analyze: - Model
+performance\
+- Prediction accuracy\
+- Feature importance
+
+------------------------------------------------------------------------
+
+## Project Structure
+
+    .
+    ├── data/                   # Dataset files from Kaggle
+    ├── report_figures/         # Generated diagnostic plots
+    ├── main.py                 # Main training and prediction script
+    ├── submission.csv          # Final Kaggle submission file
+    └── README.md               # Project documentation
+
+------------------------------------------------------------------------
+
+## Getting Started
+
+### 1. Prerequisites
+
+Make sure **Poetry** is installed. Then install the project
+dependencies:
+
+``` bash
+poetry install
 ```
 
-## Data
+------------------------------------------------------------------------
 
-Place competition data in the `data/` folder:
+### 2. Data Setup
 
-- `train.csv`, `test.csv`
-- `stores.csv`, `oil.csv`, `holidays_events.csv`, `transactions.csv`
-- `sample_submission.csv` (optional)
+Download the dataset from:
 
-## Run
+https://www.kaggle.com/competitions/store-sales-time-series-forecasting/data
 
-From this directory:
+Place the following files inside the `data/` directory:
 
-```bash
-python train_and_submit.py
+-   `train.csv`\
+-   `test.csv`\
+-   `stores.csv`\
+-   `oil.csv`\
+-   `holidays_events.csv`\
+-   `transactions.csv`
+
+------------------------------------------------------------------------
+
+### 3. Running the Pipeline
+
+Run the training and prediction pipeline inside the Poetry environment:
+
+``` bash
+poetry run python main.py
 ```
 
-This will:
+------------------------------------------------------------------------
 
-1. Load and merge all datasets
-2. Add date, holiday, oil, and store features
-3. Train a LightGBM model (target: `log1p(sales)` for RMSLE)
-4. Optionally print validation RMSLE (last 2 weeks of train)
-5. Write **submission.csv** in the required format  
-6. Save **report figures** in `report_figures/` (for lab reports; use `--no-figures` to skip)
+## 🔧 Advanced Usage
 
-### Report figures (Lab 02)
+### Hyperparameter Tuning (Optuna)
 
-By default, the script saves visualizations in the **`report_figures/`** folder:
+Run automated hyperparameter optimization:
 
-| File | Description |
-|------|-------------|
-| `01_sales_over_time.png` | Daily total sales (last 12 months) |
-| `02_sales_distribution.png` | Distribution of sales (log scale) |
-| `03_sales_by_family.png` | Top 15 product families by total sales |
-| `04_oil_price_over_time.png` | Oil price time series |
-| `05_holidays_over_time.png` | National holidays (markers) |
-| `06_actual_vs_predicted.png` | Validation: actual vs predicted sales |
-| `07_feature_importance.png` | Top 20 LightGBM feature importances |
-| `08_residuals_distribution.png` | Validation residuals (log scale) |
-| `09_validation_metrics.png` | RMSLE, MAE, RMSE on validation set |
-
-Use these in your report (data cleaning, evaluation metrics, solution description). To skip generating figures: `python train_and_submit.py --no-figures`.
-
-### Fine-tuning hyperparameters
-
-**Option 1 – Optuna (recommended)**  
-Install Optuna, then run tuning before training:
-
-```bash
-pip install optuna
-python train_and_submit.py --tune --n-trials 50
+``` bash
+python main.py --tune --n-trials 50
 ```
 
-- `--n-trials`: number of trials (default 30).
-- `--tune-timeout`: max seconds for tuning (default 3600).
-- Validation uses the last 2 weeks of train; best params are then used to train on the full dataset.
+------------------------------------------------------------------------
 
-**Option 2 – Random search (no Optuna)**  
-Uses scikit-learn’s `RandomizedSearchCV`:
+### Model Ensembling
 
-```bash
-python train_and_submit.py --tune --use-random-search --n-trials 20
+Train multiple models with different random seeds and average the
+predictions:
+
+``` bash
+python main.py --ensemble 3
 ```
 
-**Other options**
+This can improve prediction stability and overall model performance.
 
-- `--val-days 14`: use last N days of train as validation (default 14).
+------------------------------------------------------------------------
 
-## Submission
+## Evaluation Metric
 
-- Upload `submission.csv` to Kaggle via **Submit to Competition** (from a notebook output or local upload).
-- Format: `id,sales` with one prediction per test row.
+The model is evaluated using **Root Mean Squared Logarithmic Error
+(RMSLE)**:
 
-## Evaluation
+RMSLE = sqrt( (1/n) \* Σ (log(1 + y_pred) - log(1 + y_true))² )
 
-Metric: **Root Mean Squared Logarithmic Error (RMSLE)**
+The script automatically calculates this metric using a **21-day
+validation hold-out set** before training on the full dataset.
 
-\[
-\text{RMSLE} = \sqrt{\frac{1}{n}\sum_{i=1}^{n}\big(\log(p_i+1) - \log(a_i+1)\big)^2}
-\]
+------------------------------------------------------------------------
 
-The script trains on \(\log(1 + \text{sales})\), then converts predictions back with \(\exp(\text{pred}) - 1\) and clips to non-negative.
+## Visualizing Results
+
+After running the script, check the `report_figures/` folder for
+generated plots.
+
+Examples include:
+
+-   **01_sales_over_time.png** -- Historical sales trends\
+-   **06_actual_vs_predicted.png** -- Scatter plot comparing actual vs
+    predicted sales\
+-   **07_feature_importance.png** -- Most important features influencing
+    the model
+
+------------------------------------------------------------------------
+
+## Built With
+
+-   LightGBM -- Gradient Boosting Framework\
+-   Optuna -- Hyperparameter Optimization\
+-   Pandas -- Data Manipulation\
+-   Matplotlib -- Data Visualization
